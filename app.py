@@ -4,16 +4,25 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import google.generativeai as genai
 import time
+import json
 
 # --- 1. 초기 설정 ---
-st.set_page_config(page_title="앰버 통합 리뷰 관리자", layout="wide")
+st.set_page_config(page_title="앰버 7대 플랫폼 통합 관리", layout="wide")
 
 if not firebase_admin._apps:
     try:
-        cred = credentials.Certificate("serviceAccountKey.json")
+        # 1) 웹 서버(Streamlit Cloud) 환경일 때: 비밀 금고에서 열쇠를 꺼냄
+        if "FIREBASE_JSON" in st.secrets:
+            key_dict = json.loads(st.secrets["FIREBASE_JSON"])
+            cred = credentials.Certificate(key_dict)
+        # 2) 내 컴퓨터(로컬) 환경일 때: 기존처럼 파일을 읽음
+        else:
+            cred = credentials.Certificate("serviceAccountKey.json")
+            
         firebase_admin.initialize_app(cred)
     except Exception as e:
-        st.error(f"Firebase 키 파일 에러: {e}")
+        st.error(f"Firebase 키 에러: {e}")
+        st.stop() # 에러가 나면 아래 코드를 멈춰서 화면이 지저분해지는 걸 막습니다.
 
 db = firestore.client()
 

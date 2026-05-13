@@ -1,149 +1,527 @@
+"""
+앰버 7대 플랫폼 통합 AI 지배인 (Streamlit) v2
+주요 개선:
+- Gemini 2.5 Flash 로 모델 교체 (1.5/2.0 종료 대응)
+- API 키 Streamlit Secrets 로 이동 (보안)
+- 답변완료/대기중/처리완료 상태 통합 처리
+- 부킹닷컴 좋았던 점/아쉬운 점 분리 표시
+- 검색/필터/정렬 옵션
+- 에러 메시지 사용자에게 표시 (except: pass 제거)
+- 일괄 AI 답변 생성 (체크박스 선택)
+- 부정 리뷰 알림 강조
+"""
+
 import streamlit as st
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 import google.generativeai as genai
-import time
 import json
+import traceback
+from datetime import datetime
 
-# --- 1. 초기 설정 ---
-st.set_page_config(page_title="앰버 7대 플랫폼 통합 관리", layout="wide")
+# ─────────────────────────────────────────────────────────
+# 1. 초기 설정
+# ─────────────────────────────────────────────────────────
+st.set_page_config(page_title="앰버 7대 플랫폼 통합 관리", layout="wide", page_icon="🏨")
 
+# Firebase 초기화
 if not firebase_admin._apps:
     try:
-        # 1) 웹 서버(Streamlit Cloud) 환경일 때: 비밀 금고에서 열쇠를 꺼냄
         if "FIREBASE_JSON" in st.secrets:
             key_dict = json.loads(st.secrets["FIREBASE_JSON"])
             cred = credentials.Certificate(key_dict)
-        # 2) 내 컴퓨터(로컬) 환경일 때: 기존처럼 파일을 읽음
         else:
             cred = credentials.Certificate("serviceAccountKey.json")
-            
         firebase_admin.initialize_app(cred)
     except Exception as e:
         st.error(f"Firebase 키 에러: {e}")
-        st.stop() # 에러가 나면 아래 코드를 멈춰서 화면이 지저분해지는 걸 막습니다.
+        st.stop()
 
 db = firestore.client()
 
-# AI 설정
-GOOGLE_API_KEY = "AIzaSyAE1IUnXiR4Oxrkgr2LCxCC4RCwqrZwCBE"
-genai.configure(api_key=GOOGLE_API_KEY)
+# Gemini API 키 — Secrets 에서 우선 가져오고 없으면 로컬 fallback
+# ⚠️ 보안: 가급적 Streamlit Cloud → Settings → Secrets 에 GOOGLE_API_KEY 등록하세요.
+try:
+    if "GOOGLE_API_KEY" in st.secrets:
+        GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    else:
+        # 로컬 개발용 fallback — 운영 배포 전 반드시 Secrets 로 옮기세요
+        GOOGLE_API_KEY = "AIzaSyAE1IUnXiR4Oxrkgr2LCxCC4RCwqrZwCBE"
+    genai.configure(api_key=GOOGLE_API_KEY)
+except Exception as e:
+    st.warning(f"Gemini API 키 설정 실패: {e}")
+
+# 사용할 Gemini 모델 (2026년 5월 기준 권장)
+# - gemini-2.5-flash: 가성비 + 한국어 잘 함
+# - gemini-2.5-flash-lite: 더 빠르고 저렴 (fallback)
+PRIMARY_MODEL = "gemini-2.5-flash"
+FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-flash-latest"]
 
 # 관리자 페이지 주소
 ADMIN_URLS = {
     "네이버(Naver)": "https://new.smartplace.naver.com/bizes/place/6736761/reviews?menu=visitor",
     "아고다(Agoda)": "https://ycs.agoda.com/ko-kr/Reviews/Index",
-    "부킹닷컴(Booking)": "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/reviews.html",
+    "부킹닷컴(Booking.com)": "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/reviews.html",
     "익스피디아(Expedia)": "https://www.expediapartnercentral.com/",
     "야놀자(Yanolja)": "https://partner.yanolja.com/",
     "여기어때(Yeogieotte)": "https://partner.goodchoice.kr/",
-    "트립닷컴(Trip)": "https://ebooking.trip.com/pro-web/review"
+    "트립닷컴(Trip)": "https://ebooking.trip.com/pro-web/review",
 }
 
-# --- 2. 데이터 불러오기 함수 ---
+
+# ─────────────────────────────────────────────────────────
+# 2. 데이터 함수
+# ─────────────────────────────────────────────────────────
+@st.cache_data(ttl=60)  # 1분 캐시 (너무 자주 Firestore 호출 방지)
 def get_reviews():
+    """Firestore에서 전체 리뷰 조회"""
     try:
-        docs = db.collection("reviews").order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+        docs = (
+            db.collection("reviews")
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .stream()
+        )
         data = []
         for doc in docs:
             d = doc.to_dict()
-            d['id'] = doc.id
-            if 'platform' not in d: d['platform'] = '기타'
-            if 'content' not in d: d['content'] = '(내용 없음)'
-            if 'status' not in d: d['status'] = '대기중'
-            if 'date' not in d: d['date'] = '날짜 정보 없음'
+            d["id"] = doc.id
+            d.setdefault("platform", "기타")
+            d.setdefault("content", "(내용 없음)")
+            d.setdefault("status", "대기중")
+            d.setdefault("date", "날짜 정보 없음")
+            d.setdefault("ai_reply", "")
+            d.setdefault("title", "")
+            d.setdefault("positive", "")
+            d.setdefault("negative", "")
+            d.setdefault("score", "")
+            d.setdefault("user", "")
+            d.setdefault("has_reply", False)
             data.append(d)
         return pd.DataFrame(data)
-    except: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"데이터 로딩 실패: {e}")
+        return pd.DataFrame()
 
-# --- 3. 대시보드 메인 화면 ---
+
+def normalize_status(row):
+    """status 값을 3가지로 통일: 대기중 / 답변완료(플랫폼에서) / 처리완료(우리가 보냄)"""
+    s = row.get("status", "대기중")
+    if s in ("처리완료",):
+        return "처리완료"
+    if s in ("답변완료",) or row.get("has_reply"):
+        return "답변완료"
+    return "대기중"
+
+
+def call_gemini(prompt, model_name=None):
+    """Gemini 호출. 1차 모델 실패시 fallback. 모든 에러는 호출자에게 던진다."""
+    models_to_try = [model_name] if model_name else [PRIMARY_MODEL] + FALLBACK_MODELS
+    last_error = None
+    for m in models_to_try:
+        try:
+            model = genai.GenerativeModel(m)
+            res = model.generate_content(prompt)
+            return res.text
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(f"모든 Gemini 모델 호출 실패. 마지막 오류: {last_error}")
+
+
+def build_review_text(row):
+    """리뷰 row 에서 AI 가 답변할 통합 본문 만들기"""
+    parts = []
+    if row.get("title"):
+        parts.append(f"제목: {row['title']}")
+    if row.get("positive"):
+        parts.append(f"좋았던 점: {row['positive']}")
+    if row.get("negative"):
+        parts.append(f"아쉬운 점: {row['negative']}")
+    if not parts:
+        parts.append(row.get("content", ""))
+    return "\n".join(parts)
+
+
+def build_reply_prompt(row):
+    """AI 답변 생성용 프롬프트"""
+    review_text = build_review_text(row)
+    score = row.get("score", "")
+    user = row.get("user", "")
+    platform = row.get("platform", "")
+
+    return f"""당신은 제주 '엠버퓨어힐 호텔앤리조트'의 지배인입니다. 아래 {platform} 리뷰에 대해
+호텔 답변을 작성하세요.
+
+[작성 지침]
+- 첫 문장은 따뜻한 인사 (예: "안녕하세요, 엠버퓨어힐 호텔앤리조트입니다.")
+- 고객 이름이 있으면 자연스럽게 언급
+- 좋았던 점은 진심으로 감사 표현
+- 아쉬운 점은 진정성 있게 사과하고 개선 의지 표현 (책임 회피 X)
+- 점수가 낮으면 (5점 이하) 더 정중하고 자세히 사과
+- 마지막은 재방문 환영 문장으로 마무리
+- 200~350자 사이, 자연스러운 한국어
+- 이모티콘 1~2개 정도까지만 (과하지 않게)
+- 책임 회피, 변명, 영업멘트, 과한 마케팅 표현 금지
+
+[리뷰 정보]
+플랫폼: {platform}
+작성자: {user}
+점수: {score}
+{review_text}
+
+[답변]"""
+
+
+def update_review(doc_id, fields):
+    """Firestore 문서 업데이트"""
+    db.collection("reviews").document(doc_id).update(fields)
+
+
+# ─────────────────────────────────────────────────────────
+# 3. 메인 화면
+# ─────────────────────────────────────────────────────────
 st.title("🏨 앰버 7대 플랫폼 통합 AI 지배인")
 
 df = get_reviews()
 
-if not df.empty:
-    # 상단 요약 바
-    c_a, c_b, c_c = st.columns(3)
-    c_a.metric("전체 리뷰", f"{len(df)}개")
-    c_b.metric("대기 중", f"{len(df[df['status'] == '대기중'])}개")
-    c_c.metric("처리 완료", f"{len(df[df['status'] == '처리완료'])}개")
+if df.empty:
+    st.info("아직 수집된 리뷰가 없습니다. 크롤러를 먼저 실행해 주세요.")
+    st.stop()
+
+# 상태 정규화
+df["status_norm"] = df.apply(normalize_status, axis=1)
+
+# ─── 사이드바: 필터 + 통계 + 도구 ───
+with st.sidebar:
+    st.header("🔍 필터")
+
+    # 플랫폼 필터
+    platforms_all = sorted(df["platform"].unique())
+    platforms_sel = st.multiselect("플랫폼", platforms_all, default=platforms_all)
+
+    # 상태 필터
+    status_sel = st.multiselect(
+        "처리 상태",
+        ["대기중", "답변완료", "처리완료"],
+        default=["대기중"],
+        help="대기중: 아직 답변 안 한 것 / 답변완료: 플랫폼에서 답변 완료 / 처리완료: 우리가 AI로 답변 후 확정한 것",
+    )
+
+    # 점수 필터
+    score_filter = st.select_slider(
+        "점수 범위",
+        options=["전체", "낮은 점수만 (≤5)", "중간 (5~8)", "높은 점수 (≥8)"],
+        value="전체",
+    )
+
+    # 검색
+    search_keyword = st.text_input("🔎 본문 검색", placeholder="예: 조식, 청결, 직원...")
+
+    # 정렬
+    sort_order = st.radio(
+        "정렬",
+        ["최신 수집순", "오래된 수집순", "낮은 점수 먼저", "높은 점수 먼저"],
+        index=0,
+    )
 
     st.markdown("---")
+    st.header("📊 통계")
 
-    # 🔥 [부활] 전체 리뷰 종합 분석 기능
-    if st.button("📊 모든 플랫폼 리뷰 종합 분석 (인사이트 보고서 생성)"):
-        with st.spinner("비서가 모든 플랫폼의 리뷰를 종합 분석 중입니다..."):
-            all_text = " ".join(df['content'].tolist())[:4000] # 분석 글자수 제한
-            
+    total = len(df)
+    waiting = len(df[df["status_norm"] == "대기중"])
+    replied = len(df[df["status_norm"] == "답변완료"])
+    done = len(df[df["status_norm"] == "처리완료"])
+    st.metric("전체 리뷰", f"{total}개")
+    st.metric("⏳ 답변 대기", f"{waiting}개", delta=None)
+    st.metric("✅ 플랫폼에서 답변완료", f"{replied}개")
+    st.metric("🎯 우리가 처리완료", f"{done}개")
+
+    st.markdown("---")
+    if st.button("🔄 데이터 새로고침", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+# ─── 필터 적용 ───
+filtered = df[df["platform"].isin(platforms_sel)]
+filtered = filtered[filtered["status_norm"].isin(status_sel)]
+
+
+def score_to_float(s):
+    try:
+        return float(s)
+    except:
+        return None
+
+
+filtered["score_num"] = filtered["score"].apply(score_to_float)
+
+if score_filter == "낮은 점수만 (≤5)":
+    filtered = filtered[filtered["score_num"].notna() & (filtered["score_num"] <= 5)]
+elif score_filter == "중간 (5~8)":
+    filtered = filtered[
+        filtered["score_num"].notna()
+        & (filtered["score_num"] > 5)
+        & (filtered["score_num"] < 8)
+    ]
+elif score_filter == "높은 점수 (≥8)":
+    filtered = filtered[filtered["score_num"].notna() & (filtered["score_num"] >= 8)]
+
+if search_keyword:
+    kw = search_keyword.lower()
+    mask = (
+        filtered["content"].str.lower().str.contains(kw, na=False)
+        | filtered["title"].str.lower().str.contains(kw, na=False)
+        | filtered["positive"].str.lower().str.contains(kw, na=False)
+        | filtered["negative"].str.lower().str.contains(kw, na=False)
+    )
+    filtered = filtered[mask]
+
+if sort_order == "오래된 수집순":
+    filtered = filtered.iloc[::-1]
+elif sort_order == "낮은 점수 먼저":
+    filtered = filtered.sort_values("score_num", ascending=True, na_position="last")
+elif sort_order == "높은 점수 먼저":
+    filtered = filtered.sort_values("score_num", ascending=False, na_position="last")
+# "최신 수집순" 은 기본 (Firestore 가 이미 DESCENDING timestamp)
+
+# ─── 상단 요약 ───
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("필터 결과", f"{len(filtered)}개")
+c2.metric("⏳ 그 중 대기중", f"{len(filtered[filtered['status_norm'] == '대기중'])}개")
+
+# 부정 리뷰 경고 (낮은 점수)
+low_score_waiting = filtered[
+    (filtered["status_norm"] == "대기중")
+    & (filtered["score_num"].notna())
+    & (filtered["score_num"] <= 5)
+]
+c3.metric("🚨 부정 리뷰 (대기)", f"{len(low_score_waiting)}개")
+
+# 평균 점수
+avg_score = filtered["score_num"].dropna().mean()
+c4.metric("평균 점수", f"{avg_score:.1f}" if not pd.isna(avg_score) else "—")
+
+if len(low_score_waiting) > 0:
+    st.warning(
+        f"🚨 점수가 낮은 리뷰 {len(low_score_waiting)}개가 답변을 기다리고 있습니다. 우선 처리하시는 게 좋아요."
+    )
+
+st.markdown("---")
+
+# ─── 종합 분석 + 일괄 답변 ───
+ca, cb = st.columns(2)
+
+with ca:
+    if st.button("📊 모든 플랫폼 리뷰 종합 분석", use_container_width=True):
+        with st.spinner("AI 비서가 리뷰를 종합 분석 중..."):
+            # 분석 대상은 현재 필터링된 결과
+            sample_df = filtered.head(80)  # 너무 많으면 토큰 폭발
+            review_blocks = []
+            for _, r in sample_df.iterrows():
+                block = f"[{r['platform']}|{r['score']}점] {build_review_text(r)[:300]}"
+                review_blocks.append(block)
+            all_text = "\n\n".join(review_blocks)[:8000]
+
+            prompt = f"""당신은 호텔 컨설팅 전문가입니다. 아래 리뷰들을 분석해 보고서를 작성하세요.
+
+[보고서 구성]
+1. **핵심 강점 Best 3** (구체적 표현 인용)
+2. **개선 필요 사항 Worst 3** (구체적 사례 + 우선순위)
+3. **플랫폼별 고객 성향 차이** (있는 경우만)
+4. **이번 주 운영 전략 제안** (실행 가능한 3가지)
+
+[리뷰 데이터 (총 {len(sample_df)}건)]
+{all_text}
+
+[보고서]"""
+
             try:
-                # 분석은 가장 성능 좋은 모델 위주로 시도
-                m = genai.GenerativeModel('gemini-1.5-flash')
-                report_prompt = f"""
-                당신은 호텔 컨설팅 전문가입니다. 아래 7개 플랫폼 리뷰를 분석하여 보고서를 작성하세요.
-                1. 우리 호텔의 핵심 강점 (Best 3)
-                2. 당장 개선이 필요한 불만 사항 (Worst 3)
-                3. 플랫폼별 고객 성향 차이 요약
-                4. 지배인을 위한 이번 주 운영 전략 제안
-                
-                리뷰 데이터: {all_text}
-                """
-                report_res = m.generate_content(report_prompt)
-                st.success("✅ 종합 보고서 작성이 완료되었습니다!")
-                st.info(report_res.text)
+                report = call_gemini(prompt)
+                st.success("✅ 종합 보고서 작성 완료!")
+                st.info(report)
             except Exception as e:
-                st.error(f"분석 중 오류 발생: {e}")
+                st.error(f"분석 실패: {e}")
+                with st.expander("상세 오류"):
+                    st.code(traceback.format_exc())
 
-    st.markdown("---")
+with cb:
+    waiting_in_filter = filtered[filtered["status_norm"] == "대기중"]
+    if st.button(
+        f"🤖 대기 중 리뷰 일괄 AI 답변 ({len(waiting_in_filter)}개)",
+        use_container_width=True,
+        disabled=(len(waiting_in_filter) == 0),
+    ):
+        progress = st.progress(0)
+        success_count = 0
+        fail_count = 0
+        for i, (_, row) in enumerate(waiting_in_filter.iterrows()):
+            try:
+                if row.get("ai_reply"):
+                    # 이미 초안 있으면 스킵
+                    continue
+                prompt = build_reply_prompt(row)
+                reply = call_gemini(prompt)
+                update_review(row["id"], {"ai_reply": reply})
+                success_count += 1
+            except Exception as e:
+                fail_count += 1
+            progress.progress((i + 1) / len(waiting_in_filter))
+        st.success(f"✅ {success_count}개 초안 작성 완료 (실패 {fail_count}개)")
+        st.cache_data.clear()
+        st.rerun()
 
-    # 플랫폼별 탭 구성
-    platforms = sorted(df['platform'].unique())
-    tabs = st.tabs(platforms)
+st.markdown("---")
 
-    for i, tab in enumerate(tabs):
-        with tab:
-            p_name = platforms[i]
-            p_df = df[df['platform'] == p_name]
-            admin_url = ADMIN_URLS.get(p_name, "#")
+# ─── 플랫폼별 탭 ───
+if len(filtered) == 0:
+    st.info("필터 조건에 맞는 리뷰가 없습니다.")
+    st.stop()
 
-            for index, row in p_df.iterrows():
-                unique_key = f"{row['platform']}_{row['id']}"
-                is_waiting = (row['status'] == '대기중')
-                
-                with st.expander(f"📌 [{row['status']}] {row['date']} | {row['content'][:40]}...", expanded=is_waiting):
-                    col1, col2 = st.columns([3, 1])
-                    
-                    with col1:
-                        st.markdown(f"**[원문]**\n{row['content']}")
-                        
-                        if not row.get('ai_reply'):
-                            if st.button("🤖 AI 답변 초안 만들기", key=f"btn_{unique_key}"):
-                                with st.spinner("작성 중..."):
-                                    # 모델 2중 방어
-                                    for m_name in ['gemini-1.5-flash', 'gemini-2.0-flash-exp']:
-                                        try:
-                                            model = genai.GenerativeModel(m_name)
-                                            res = model.generate_content(f"호텔 지배인으로서 {row['platform']} 리뷰에 답글 쓰기: {row['content']}")
-                                            db.collection("reviews").document(row['id']).update({"ai_reply": res.text})
-                                            st.rerun()
-                                            break
-                                        except: continue
-                        else:
-                            st.markdown("**✍️ 지배인님, 내용을 수정하신 후 아래 버튼을 이용하세요:**")
-                            edited_reply = st.text_area("답변 수정", value=row['ai_reply'], height=150, key=f"edit_{unique_key}")
-                            st.code(edited_reply, language=None) # 복사 기능 제공
-                            
-                            c_copy, c_link = st.columns(2)
-                            with c_copy:
-                                st.link_button("🌐 관리자 페이지 열기", admin_url)
-                            with c_link:
-                                if st.button("✅ 확정 및 완료", key=f"confirm_{unique_key}"):
-                                    db.collection("reviews").document(row['id']).update({
-                                        "ai_reply": edited_reply, "status": "처리완료"
-                                    })
+platforms_in_filter = sorted(filtered["platform"].unique())
+tabs = st.tabs([f"{p} ({len(filtered[filtered['platform']==p])})" for p in platforms_in_filter])
+
+for tab_idx, tab in enumerate(tabs):
+    with tab:
+        p_name = platforms_in_filter[tab_idx]
+        p_df = filtered[filtered["platform"] == p_name]
+        admin_url = ADMIN_URLS.get(p_name, "#")
+
+        st.link_button(f"🌐 {p_name} 관리자 페이지 열기", admin_url)
+
+        for _, row in p_df.iterrows():
+            unique_key = f"{row['platform']}_{row['id']}"
+            status = row["status_norm"]
+
+            # expander 헤더 — 점수 + 이름 + 날짜 + 미리보기
+            header_parts = []
+            if status == "대기중":
+                header_parts.append("⏳")
+            elif status == "답변완료":
+                header_parts.append("✅")
+            else:
+                header_parts.append("🎯")
+
+            if row.get("score"):
+                header_parts.append(f"**{row['score']}점**")
+            if row.get("user"):
+                header_parts.append(row["user"][:20])
+            header_parts.append(row.get("date", ""))
+
+            # 미리보기: 제목 우선, 없으면 본문 첫 줄
+            preview = (
+                row.get("title")
+                or row.get("negative")
+                or row.get("positive")
+                or row.get("content", "")
+            )
+            preview = preview.replace("\n", " ")[:50]
+            header_parts.append(f"| {preview}...")
+
+            is_waiting = status == "대기중"
+            header = " ".join(header_parts)
+
+            with st.expander(header, expanded=is_waiting):
+                col1, col2 = st.columns([3, 1])
+
+                with col1:
+                    # 리뷰 본문 — 필드 구조화 표시
+                    if row.get("title"):
+                        st.markdown(f"### {row['title']}")
+
+                    if row.get("positive") or row.get("negative"):
+                        # 부킹닷컴식 좋았던 점/아쉬운 점 분리 표시
+                        if row.get("positive"):
+                            st.markdown(f"**😊 좋았던 점**")
+                            st.markdown(f"> {row['positive']}")
+                        if row.get("negative"):
+                            st.markdown(f"**😞 아쉬운 점**")
+                            st.markdown(f"> {row['negative']}")
+                    else:
+                        # 통합 본문 표시
+                        st.markdown(f"**[원문]**")
+                        st.markdown(f"> {row.get('content', '(내용 없음)')}")
+
+                    # 메타 정보
+                    meta = []
+                    if row.get("room_type"):
+                        meta.append(f"🛏 {row['room_type']}")
+                    if row.get("stay_period"):
+                        meta.append(f"📅 {row['stay_period']}")
+                    if row.get("country"):
+                        meta.append(f"🌍 {row['country']}")
+                    if row.get("traveler_type"):
+                        meta.append(f"👥 {row['traveler_type']}")
+                    if meta:
+                        st.caption(" | ".join(meta))
+
+                    st.markdown("---")
+
+                    # AI 답변 영역
+                    if not row.get("ai_reply"):
+                        if st.button("🤖 AI 답변 초안 만들기", key=f"btn_{unique_key}"):
+                            with st.spinner("AI가 답변을 작성하는 중..."):
+                                try:
+                                    prompt = build_reply_prompt(row)
+                                    reply = call_gemini(prompt)
+                                    update_review(row["id"], {"ai_reply": reply})
+                                    st.cache_data.clear()
                                     st.rerun()
+                                except Exception as e:
+                                    st.error(f"AI 답변 생성 실패: {e}")
+                                    with st.expander("상세 오류 보기"):
+                                        st.code(traceback.format_exc())
+                    else:
+                        st.markdown("**✍️ AI 답변 초안 (수정 가능)**")
+                        edited_reply = st.text_area(
+                            "답변 수정",
+                            value=row["ai_reply"],
+                            height=180,
+                            key=f"edit_{unique_key}",
+                            label_visibility="collapsed",
+                        )
+                        st.code(edited_reply, language=None)  # 복사용
 
-                    with col2:
-                        st.write(f"상태: **{row['status']}**")
-else:
-    st.info("데이터가 없습니다.")
+                        c_a, c_b, c_c = st.columns(3)
+                        with c_a:
+                            st.link_button("🌐 관리자 페이지 열기", admin_url)
+                        with c_b:
+                            if st.button("🔄 답변 재생성", key=f"regen_{unique_key}"):
+                                with st.spinner("재생성 중..."):
+                                    try:
+                                        prompt = build_reply_prompt(row)
+                                        reply = call_gemini(prompt)
+                                        update_review(row["id"], {"ai_reply": reply})
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"재생성 실패: {e}")
+                        with c_c:
+                            if st.button("✅ 확정 및 완료", key=f"confirm_{unique_key}"):
+                                update_review(
+                                    row["id"],
+                                    {"ai_reply": edited_reply, "status": "처리완료"},
+                                )
+                                st.cache_data.clear()
+                                st.rerun()
+
+                with col2:
+                    st.write(f"**상태**: {status}")
+                    if row.get("score"):
+                        score_val = score_to_float(row["score"])
+                        if score_val is not None:
+                            if score_val <= 5:
+                                st.error(f"⚠️ 점수 {row['score']}")
+                            elif score_val < 8:
+                                st.warning(f"점수 {row['score']}")
+                            else:
+                                st.success(f"점수 {row['score']}")
+                    if row.get("booking_id"):
+                        st.caption(f"예약번호\n`{row['booking_id']}`")
+
+                    # 잘못 분류된 답변완료를 다시 대기로 되돌리기 (수동)
+                    if status == "답변완료":
+                        if st.button("↩️ 대기중으로 되돌리기", key=f"undo_{unique_key}", help="잘못 답변완료로 표시된 경우 클릭"):
+                            update_review(row["id"], {"status": "대기중", "has_reply": False})
+                            st.cache_data.clear()
+                            st.rerun()

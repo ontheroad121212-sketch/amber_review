@@ -40,17 +40,25 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# Gemini API 키 — Secrets 에서 우선 가져오고 없으면 로컬 fallback
-# ⚠️ 보안: 가급적 Streamlit Cloud → Settings → Secrets 에 GOOGLE_API_KEY 등록하세요.
+# Gemini API 키 — 반드시 Streamlit Secrets 에 등록해서 사용
+# ⚠️ 보안: 키를 코드에 직접 적으면 GitHub 등에서 노출되어 자동 차단됩니다.
+#   Streamlit Cloud → 본인 앱 → Settings → Secrets 에서 다음과 같이 등록:
+#       GOOGLE_API_KEY = "AIzaSy..."
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+        genai.configure(api_key=GOOGLE_API_KEY)
     else:
-        # 로컬 개발용 fallback — 운영 배포 전 반드시 Secrets 로 옮기세요
-        GOOGLE_API_KEY = "AIzaSyAE1IUnXiR4Oxrkgr2LCxCC4RCwqrZwCBE"
-    genai.configure(api_key=GOOGLE_API_KEY)
+        st.error(
+            "⚠️ Gemini API 키가 등록되지 않았습니다.\n\n"
+            "Streamlit Cloud → 앱 Settings → Secrets 에서 "
+            "`GOOGLE_API_KEY = \"새_키_값\"` 형식으로 등록해 주세요. "
+            "키는 https://aistudio.google.com/apikey 에서 발급받을 수 있어요."
+        )
+        st.stop()
 except Exception as e:
-    st.warning(f"Gemini API 키 설정 실패: {e}")
+    st.error(f"Gemini API 키 설정 실패: {e}")
+    st.stop()
 
 # 사용할 Gemini 모델 (2026년 5월 기준 권장)
 # - gemini-2.5-flash: 가성비 + 한국어 잘 함
@@ -150,27 +158,64 @@ def build_reply_prompt(row):
     user = row.get("user", "")
     platform = row.get("platform", "")
 
-    return f"""당신은 제주 '엠버퓨어힐 호텔앤리조트'의 지배인입니다. 아래 {platform} 리뷰에 대해
-호텔 답변을 작성하세요.
+    # 점수에 따른 답변 방향
+    score_val = None
+    try:
+        score_val = float(score)
+    except:
+        pass
+
+    score_guide = ""
+    if score_val is not None:
+        if score_val <= 5:
+            score_guide = "점수가 낮은 리뷰입니다. 변명하지 말고 진심으로 미안한 마음을 담아 응답하세요. 단, 과장된 사죄 표현(예: '죄송한 마음 금할 길이 없습니다')은 절대 쓰지 마세요."
+        elif score_val < 8:
+            score_guide = "점수가 중간 정도입니다. 좋았던 점은 진심으로 감사하고, 아쉬운 점은 담백하게 받아들이세요."
+        else:
+            score_guide = "점수가 높은 리뷰입니다. 과하지 않게 감사의 마음을 표현하세요."
+
+    return f"""당신은 제주 '엠버퓨어힐 호텔앤리조트'의 지배인입니다.
+{platform} 에 올라온 아래 리뷰에 대한 답변을 작성해 주세요.
+
+[톤]
+- '정중하지만 거리감 없는' 느낌. 단골에게 답하듯 따뜻하게.
+- AI가 쓴 듯한 격식 차린 클리셰는 절대 금지.
+- 마치 사람이 한 명씩 직접 손으로 쓴 듯 자연스럽게.
+
+[금지 표현 — 절대 사용 금지]
+다음과 같은 진부한 호텔 답변 클리셰는 **한 글자도 쓰지 마세요**:
+- "죄송한 마음 금할 길이 없습니다", "사죄의 말씀을 올립니다"
+- "고객님께 막중한 책임감을 느낍니다"
+- "최고의 서비스로 보답하겠습니다"
+- "더욱 노력하는 호텔이 되도록 하겠습니다"
+- "심심한 사과의 말씀", "깊이 반성하고 있습니다"
+- "다시 한번 진심으로 사과드립니다"
+- "고객님의 소중한 의견" (너무 흔함)
+- "성원에 보답하기 위해", "기대에 부응할 수 있도록"
+- "불편을 끼쳐드려 대단히 죄송합니다" 같은 영혼 없는 정형구
 
 [작성 지침]
-- 첫 문장은 따뜻한 인사 (예: "안녕하세요, 엠버퓨어힐 호텔앤리조트입니다.")
-- 고객 이름이 있으면 자연스럽게 언급
-- 좋았던 점은 진심으로 감사 표현
-- 아쉬운 점은 진정성 있게 사과하고 개선 의지 표현 (책임 회피 X)
-- 점수가 낮으면 (5점 이하) 더 정중하고 자세히 사과
-- 마지막은 재방문 환영 문장으로 마무리
-- 200~350자 사이, 자연스러운 한국어
-- 이모티콘 1~2개 정도까지만 (과하지 않게)
-- 책임 회피, 변명, 영업멘트, 과한 마케팅 표현 금지
+- 첫 문장: "안녕하세요, 엠버퓨어힐입니다." 정도로 짧고 자연스럽게.
+- 작성자 이름이 있으면 자연스럽게 한 번 호명. (예: "Jeongho 님, 방문해 주셔서 감사합니다.")
+- 리뷰에서 **구체적으로 언급된 부분** (조식, 뷔페, 풀, 객실, 직원 등) 을 답변에도 한두 가지 짚어주세요. 두루뭉술 금지.
+- 좋았던 점 → 무엇이 어떻게 좋았다는지 받아 적고 감사.
+- 아쉬운 점 → 변명 없이 인정. 가능하면 어떤 부분을 어떻게 살펴보겠다는 식의 구체적인 한 마디.
+- 마지막은 재방문 환영. 단, "꼭 다시 모시고 싶습니다" 류는 OK, "성원에 보답..." 류는 금지.
+- 분량: **200~350자** 사이.
+- 이모티콘: 0~1개. 본문 끝 또는 자연스러운 위치에 1개 정도만. (예: 🌿 😊 🙏) 줄줄이 안 됨.
+- 영업/마케팅 표현 금지 ("저희 호텔은 ~를 자랑합니다" 같은 거).
 
-[리뷰 정보]
+[점수 가이드]
+{score_guide}
+
+[답변할 리뷰]
 플랫폼: {platform}
-작성자: {user}
-점수: {score}
+작성자: {user or "(이름 없음)"}
+점수: {score or "(없음)"}
 {review_text}
 
-[답변]"""
+위 리뷰에 대한 호텔 답변만 작성해 주세요. 따옴표나 서두 설명 없이 답변 본문만 출력합니다.
+"""
 
 
 def update_review(doc_id, fields):

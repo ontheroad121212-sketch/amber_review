@@ -67,14 +67,15 @@ PRIMARY_MODEL = "gemini-2.5-flash"
 FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-flash-latest"]
 
 # 관리자 페이지 주소
+# ⚠️ 주의: 키는 크롤러가 Firestore에 저장한 'platform' 값과 정확히 일치해야 매칭됨
 ADMIN_URLS = {
-    "네이버(Naver)": "https://new.smartplace.naver.com/bizes/place/6736761/reviews?menu=visitor",
+    "네이버(Naver)": "https://new.smartplace.naver.com/bizes/place/6736761/reviews?bookingBusinessId=953025&menu=visitor",
     "아고다(Agoda)": "https://ycs.agoda.com/ko-kr/Reviews/Index",
     "부킹닷컴(Booking.com)": "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/reviews.html",
     "익스피디아(Expedia)": "https://www.expediapartnercentral.com/",
-    "야놀자(Yanolja)": "https://partner.yanolja.com/",
-    "여기어때(Yeogieotte)": "https://partner.goodchoice.kr/",
-    "트립닷컴(Trip)": "https://ebooking.trip.com/pro-web/review",
+    "야놀자": "https://partner.yanolja.com/review",
+    "여기어때": "https://partner.goodchoice.kr/reservations/reservation-list",
+    "트립닷컴(Trip.com)": "https://ebooking.trip.com/pro-web/review",
     "마이리얼트립(MyRealTrip)": "https://partner.myrealtrip.com/reviews/accommodation",
     "트립어드바이저(TripAdvisor)": "https://www.tripadvisor.com/Owners",
     "구글(Google)": "https://business.google.com/reviews",

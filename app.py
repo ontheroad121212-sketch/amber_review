@@ -111,13 +111,13 @@ def get_reviews():
             d.setdefault("has_reply", False)
             # 플랫폼별 추가 필드
             d.setdefault("satisfaction_tags", "")  # 마이리얼트립
-            d.setdefault("post_time", "")           # 구글 (상대시각)
-            d.setdefault("post_date", "")           # 트립어드바이저, 익스피디아
-            d.setdefault("travel_date", "")         # 마이리얼트립
-            d.setdefault("stay_period", "")         # 아고다, 익스피디아
-            d.setdefault("country", "")             # 부킹, 아고다
-            d.setdefault("room_type", "")           # 아고다, 마이리얼트립
-            d.setdefault("traveler_type", "")       # 아고다
+            d.setdefault("post_time", "")            # 구글 (상대시각)
+            d.setdefault("post_date", "")            # 트립어드바이저, 익스피디아
+            d.setdefault("travel_date", "")          # 마이리얼트립
+            d.setdefault("stay_period", "")          # 아고다, 익스피디아
+            d.setdefault("country", "")              # 부킹, 아고다
+            d.setdefault("room_type", "")            # 아고다, 마이리얼트립
+            d.setdefault("traveler_type", "")        # 아고다
             d.setdefault("booking_id", "")
             d.setdefault("review_id", "")
             d.setdefault("owner_reply", "")
@@ -289,7 +289,7 @@ with st.sidebar:
     # 정렬
     sort_order = st.radio(
         "정렬",
-        ["최신 수집순", "오래된 수집순", "낮은 점수 먼저", "높은 점수 먼저"],
+        ["최신 수집순", "오래된 수집순", "낮은 점수 먼저", "높은 점수 먼저", "리뷰 작성일 (최신순)", "리뷰 작성일 (오래된순)"],
         index=0,
     )
 
@@ -372,6 +372,10 @@ elif sort_order == "낮은 점수 먼저":
     filtered = filtered.sort_values("score_pct", ascending=True, na_position="last")
 elif sort_order == "높은 점수 먼저":
     filtered = filtered.sort_values("score_pct", ascending=False, na_position="last")
+elif sort_order == "리뷰 작성일 (최신순)":
+    filtered = filtered.sort_values("date", ascending=False, na_position="last")
+elif sort_order == "리뷰 작성일 (오래된순)":
+    filtered = filtered.sort_values("date", ascending=True, na_position="last")
 # "최신 수집순" 은 기본 (Firestore 가 이미 DESCENDING timestamp)
 
 # ─── 상단 요약 ───

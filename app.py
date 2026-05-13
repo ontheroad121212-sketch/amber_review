@@ -75,6 +75,9 @@ ADMIN_URLS = {
     "야놀자(Yanolja)": "https://partner.yanolja.com/",
     "여기어때(Yeogieotte)": "https://partner.goodchoice.kr/",
     "트립닷컴(Trip)": "https://ebooking.trip.com/pro-web/review",
+    "마이리얼트립(MyRealTrip)": "https://partner.myrealtrip.com/reviews/accommodation",
+    "트립어드바이저(TripAdvisor)": "https://www.tripadvisor.com/Owners",
+    "구글(Google)": "https://business.google.com/reviews",
 }
 
 
@@ -105,6 +108,18 @@ def get_reviews():
             d.setdefault("score", "")
             d.setdefault("user", "")
             d.setdefault("has_reply", False)
+            # 플랫폼별 추가 필드
+            d.setdefault("satisfaction_tags", "")  # 마이리얼트립
+            d.setdefault("post_time", "")           # 구글 (상대시각)
+            d.setdefault("post_date", "")           # 트립어드바이저, 익스피디아
+            d.setdefault("travel_date", "")         # 마이리얼트립
+            d.setdefault("stay_period", "")         # 아고다, 익스피디아
+            d.setdefault("country", "")             # 부킹, 아고다
+            d.setdefault("room_type", "")           # 아고다, 마이리얼트립
+            d.setdefault("traveler_type", "")       # 아고다
+            d.setdefault("booking_id", "")
+            d.setdefault("review_id", "")
+            d.setdefault("owner_reply", "")
             data.append(d)
         return pd.DataFrame(data)
     except Exception as e:
@@ -158,21 +173,27 @@ def build_reply_prompt(row):
     user = row.get("user", "")
     platform = row.get("platform", "")
 
-    # 점수에 따른 답변 방향
+    # 점수에 따른 답변 방향 (5점/10점 만점 자동 환산)
     score_val = None
     try:
         score_val = float(score)
     except:
         pass
 
+    # 만점 자동 판단
+    max_score = 5 if platform in ("구글(Google)", "트립어드바이저(TripAdvisor)") else 10
+    score_pct = (score_val / max_score) * 100 if score_val is not None else None
+
     score_guide = ""
+    score_display = ""
     if score_val is not None:
-        if score_val <= 5:
-            score_guide = "점수가 낮은 리뷰입니다. 변명하지 말고 진심으로 미안한 마음을 담아 응답하세요. 단, 과장된 사죄 표현(예: '죄송한 마음 금할 길이 없습니다')은 절대 쓰지 마세요."
-        elif score_val < 8:
-            score_guide = "점수가 중간 정도입니다. 좋았던 점은 진심으로 감사하고, 아쉬운 점은 담백하게 받아들이세요."
+        score_display = f"{score}/{max_score}점"
+        if score_pct <= 50:
+            score_guide = "점수가 매우 낮은 리뷰입니다. 변명하지 말고 진심으로 미안한 마음을 담아 응답하세요. 단, 과장된 사죄 표현(예: '죄송한 마음 금할 길이 없습니다')은 절대 쓰지 마세요. 구체적으로 어떤 부분을 어떻게 살펴보겠다는 한 마디를 포함해주세요."
+        elif score_pct < 80:
+            score_guide = "점수가 중간 정도입니다. 좋았던 점은 진심으로 감사하고, 아쉬운 점은 담백하게 받아들이세요. 변명 없이."
         else:
-            score_guide = "점수가 높은 리뷰입니다. 과하지 않게 감사의 마음을 표현하세요."
+            score_guide = "점수가 높은 리뷰입니다. 과하지 않게 감사의 마음을 표현하세요. 영업멘트로 흐르지 않도록 주의."
 
     return f"""당신은 제주 '엠버퓨어힐 호텔앤리조트'의 지배인입니다.
 {platform} 에 올라온 아래 리뷰에 대한 답변을 작성해 주세요.
@@ -211,7 +232,7 @@ def build_reply_prompt(row):
 [답변할 리뷰]
 플랫폼: {platform}
 작성자: {user or "(이름 없음)"}
-점수: {score or "(없음)"}
+점수: {score_display or "(없음)"}
 {review_text}
 
 위 리뷰에 대한 호텔 답변만 작성해 주세요. 따옴표나 서두 설명 없이 답변 본문만 출력합니다.
@@ -226,7 +247,7 @@ def update_review(doc_id, fields):
 # ─────────────────────────────────────────────────────────
 # 3. 메인 화면
 # ─────────────────────────────────────────────────────────
-st.title("🏨 앰버 7대 플랫폼 통합 AI 지배인")
+st.title("🏨 앰버 통합 리뷰 AI 지배인")
 
 df = get_reviews()
 
@@ -253,11 +274,12 @@ with st.sidebar:
         help="대기중: 아직 답변 안 한 것 / 답변완료: 플랫폼에서 답변 완료 / 처리완료: 우리가 AI로 답변 후 확정한 것",
     )
 
-    # 점수 필터
+    # 점수 필터 (구글/트립=5점만점, 부킹/아고다/익스=10점만점 — 자동 환산)
     score_filter = st.select_slider(
         "점수 범위",
         options=["전체", "낮은 점수만 (≤5)", "중간 (5~8)", "높은 점수 (≥8)"],
         value="전체",
+        help="구글/트립어드바이저는 5점 만점, 나머지는 10점 만점. 자동 환산하여 비교합니다.",
     )
 
     # 검색
@@ -299,18 +321,38 @@ def score_to_float(s):
         return None
 
 
-filtered["score_num"] = filtered["score"].apply(score_to_float)
+def score_to_pct(score_val, platform):
+    """점수를 0-100 백분율로 정규화.
+    - 구글, 트립어드바이저: 1~5점 → x*20 으로 0-100 환산
+    - 부킹, 아고다, 익스피디아: 1~10점 → x*10 으로 0-100 환산
+    - 마이리얼트립: 점수 없음 → None
+    """
+    if score_val is None or pd.isna(score_val):
+        return None
+    if platform in ("구글(Google)", "트립어드바이저(TripAdvisor)"):
+        return score_val * 20  # 5점 만점 → 100점 환산
+    else:
+        return score_val * 10  # 10점 만점 → 100점 환산
 
+
+filtered["score_num"] = filtered["score"].apply(score_to_float)
+filtered["score_pct"] = filtered.apply(
+    lambda r: score_to_pct(r["score_num"], r["platform"]), axis=1
+)
+
+# 점수 필터 - 백분율 기준 (0-100 통합)
+# "낮음" = 50% 이하 (5점만점 2.5점 이하 / 10점만점 5점 이하)
+# "중간" = 50-80% / "높음" = 80% 이상
 if score_filter == "낮은 점수만 (≤5)":
-    filtered = filtered[filtered["score_num"].notna() & (filtered["score_num"] <= 5)]
+    filtered = filtered[filtered["score_pct"].notna() & (filtered["score_pct"] <= 50)]
 elif score_filter == "중간 (5~8)":
     filtered = filtered[
-        filtered["score_num"].notna()
-        & (filtered["score_num"] > 5)
-        & (filtered["score_num"] < 8)
+        filtered["score_pct"].notna()
+        & (filtered["score_pct"] > 50)
+        & (filtered["score_pct"] < 80)
     ]
 elif score_filter == "높은 점수 (≥8)":
-    filtered = filtered[filtered["score_num"].notna() & (filtered["score_num"] >= 8)]
+    filtered = filtered[filtered["score_pct"].notna() & (filtered["score_pct"] >= 80)]
 
 if search_keyword:
     kw = search_keyword.lower()
@@ -319,15 +361,16 @@ if search_keyword:
         | filtered["title"].str.lower().str.contains(kw, na=False)
         | filtered["positive"].str.lower().str.contains(kw, na=False)
         | filtered["negative"].str.lower().str.contains(kw, na=False)
+        | filtered["satisfaction_tags"].str.lower().str.contains(kw, na=False)
     )
     filtered = filtered[mask]
 
 if sort_order == "오래된 수집순":
     filtered = filtered.iloc[::-1]
 elif sort_order == "낮은 점수 먼저":
-    filtered = filtered.sort_values("score_num", ascending=True, na_position="last")
+    filtered = filtered.sort_values("score_pct", ascending=True, na_position="last")
 elif sort_order == "높은 점수 먼저":
-    filtered = filtered.sort_values("score_num", ascending=False, na_position="last")
+    filtered = filtered.sort_values("score_pct", ascending=False, na_position="last")
 # "최신 수집순" 은 기본 (Firestore 가 이미 DESCENDING timestamp)
 
 # ─── 상단 요약 ───
@@ -335,17 +378,21 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("필터 결과", f"{len(filtered)}개")
 c2.metric("⏳ 그 중 대기중", f"{len(filtered[filtered['status_norm'] == '대기중'])}개")
 
-# 부정 리뷰 경고 (낮은 점수)
+# 부정 리뷰 경고 (낮은 점수) - 백분율 50% 이하 (5점만점 2.5/10점만점 5점)
 low_score_waiting = filtered[
     (filtered["status_norm"] == "대기중")
-    & (filtered["score_num"].notna())
-    & (filtered["score_num"] <= 5)
+    & (filtered["score_pct"].notna())
+    & (filtered["score_pct"] <= 50)
 ]
 c3.metric("🚨 부정 리뷰 (대기)", f"{len(low_score_waiting)}개")
 
-# 평균 점수
-avg_score = filtered["score_num"].dropna().mean()
-c4.metric("평균 점수", f"{avg_score:.1f}" if not pd.isna(avg_score) else "—")
+# 평균 점수 - 백분율로 표시 (다른 만점 체계 통합)
+avg_pct = filtered["score_pct"].dropna().mean()
+c4.metric(
+    "평균 만족도",
+    f"{avg_pct:.0f}%" if not pd.isna(avg_pct) else "—",
+    help="플랫폼별 만점 다른 점수를 100% 만점으로 환산한 평균",
+)
 
 if len(low_score_waiting) > 0:
     st.warning(
@@ -487,18 +534,31 @@ for tab_idx, tab in enumerate(tabs):
                         st.markdown(f"**[원문]**")
                         st.markdown(f"> {row.get('content', '(내용 없음)')}")
 
+                    # 마이리얼트립 만족도 태그 (있는 경우)
+                    if row.get("satisfaction_tags"):
+                        st.caption(f"⭐ {row['satisfaction_tags']}")
+
                     # 메타 정보
                     meta = []
                     if row.get("room_type"):
                         meta.append(f"🛏 {row['room_type']}")
                     if row.get("stay_period"):
                         meta.append(f"📅 {row['stay_period']}")
+                    if row.get("travel_date"):
+                        meta.append(f"✈ {row['travel_date']}")
+                    if row.get("post_time"):
+                        meta.append(f"🕐 {row['post_time']}")
                     if row.get("country"):
                         meta.append(f"🌍 {row['country']}")
                     if row.get("traveler_type"):
                         meta.append(f"👥 {row['traveler_type']}")
                     if meta:
                         st.caption(" | ".join(meta))
+
+                    # 호텔이 이미 답변한 내용 (답변완료된 경우)
+                    if row.get("owner_reply"):
+                        with st.expander("📩 호텔 측 기존 답변 보기"):
+                            st.markdown(f"> {row['owner_reply']}")
 
                     st.markdown("---")
 
@@ -555,18 +615,34 @@ for tab_idx, tab in enumerate(tabs):
                     if row.get("score"):
                         score_val = score_to_float(row["score"])
                         if score_val is not None:
-                            if score_val <= 5:
-                                st.error(f"⚠️ 점수 {row['score']}")
-                            elif score_val < 8:
-                                st.warning(f"점수 {row['score']}")
-                            else:
-                                st.success(f"점수 {row['score']}")
+                            score_pct = score_to_pct(score_val, row["platform"])
+                            # 만점 표기 (구글/트립=5, 나머지=10)
+                            max_score = 5 if row["platform"] in (
+                                "구글(Google)", "트립어드바이저(TripAdvisor)"
+                            ) else 10
+                            score_label = f"{row['score']}/{max_score}"
+
+                            if score_pct is not None:
+                                if score_pct <= 50:
+                                    st.error(f"⚠️ 점수 {score_label}")
+                                elif score_pct < 80:
+                                    st.warning(f"점수 {score_label}")
+                                else:
+                                    st.success(f"점수 {score_label}")
                     if row.get("booking_id"):
                         st.caption(f"예약번호\n`{row['booking_id']}`")
+                    if row.get("review_id"):
+                        st.caption(f"리뷰ID\n`{row['review_id']}`")
 
                     # 잘못 분류된 답변완료를 다시 대기로 되돌리기 (수동)
                     if status == "답변완료":
                         if st.button("↩️ 대기중으로 되돌리기", key=f"undo_{unique_key}", help="잘못 답변완료로 표시된 경우 클릭"):
                             update_review(row["id"], {"status": "대기중", "has_reply": False})
+                            st.cache_data.clear()
+                            st.rerun()
+                    # 반대로 대기중을 답변완료로 (트립어드바이저처럼 수동 분류 필요할 때)
+                    elif status == "대기중":
+                        if st.button("✅ 답변완료로 표시", key=f"mark_replied_{unique_key}", help="이미 플랫폼에서 답변한 경우"):
+                            update_review(row["id"], {"status": "답변완료", "has_reply": True})
                             st.cache_data.clear()
                             st.rerun()

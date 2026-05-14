@@ -1,4 +1,2 @@
 fonts-nanum
-fonts-nanum-coding
 fonts-noto-cjk
- 

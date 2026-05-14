@@ -2,3 +2,7 @@ streamlit
 pandas
 firebase-admin
 google-generativeai
+plotly
+wordcloud
+kiwipiepy
+matplotlib

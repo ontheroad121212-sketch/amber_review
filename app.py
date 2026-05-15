@@ -1313,7 +1313,40 @@ with main_tabs[3]:
 with main_tabs[4]:
     st.header("📝 리뷰 관리")
 
-    with st.expander("🔍 필터 옵션", expanded=True):
+    # ─── 🔎 강력한 검색 바 (최상단, 항상 보이게) ───
+    search_col1, search_col2, search_col3 = st.columns([5, 2, 2])
+    with search_col1:
+        search_keyword = st.text_input(
+            "🔎 리뷰 검색 (본문, 제목, 작성자, 좋았던점/아쉬운점 모두 검색)",
+            placeholder="예: 지난주에 다녀왔어요 / 조식 / 김지배 / 청결 / 부드러웠어요",
+            key="rm_search",
+            help="플랫폼 관리자 페이지에서 본 문구 일부를 그대로 검색해 보세요. 검색 시 다른 필터는 자동으로 풀려 모든 리뷰에서 찾습니다.",
+        )
+    with search_col2:
+        search_mode = st.selectbox(
+            "검색 모드",
+            ["부분 일치", "정확히 일치", "단어 모두 포함 (AND)"],
+            key="rm_search_mode",
+            help="부분 일치: 입력값이 포함된 리뷰 / 정확히 일치: 띄어쓰기까지 동일 / AND: 여러 단어 모두 들어간 리뷰",
+        )
+    with search_col3:
+        search_in_reply = st.checkbox(
+            "AI 답변도 검색",
+            value=False,
+            key="rm_search_reply",
+            help="작성한 AI 답변 본문에서도 검색합니다",
+        )
+
+    is_searching = bool(search_keyword and search_keyword.strip())
+
+    # ─── 필터 옵션 (검색 중이면 자동으로 접힘) ───
+    with st.expander(
+        "🔍 필터 옵션 " + ("(검색 중이라 자동 완화됨)" if is_searching else ""),
+        expanded=not is_searching,
+    ):
+        if is_searching:
+            st.caption("💡 검색어가 입력된 동안에는 플랫폼/상태 필터가 무시되고 **모든 리뷰**에서 찾아요. 다른 필터(점수/카테고리)는 적용됩니다.")
+
         f_col1, f_col2, f_col3 = st.columns(3)
         with f_col1:
             platforms_all = sorted(df["platform"].unique())
@@ -1329,7 +1362,6 @@ with main_tabs[4]:
             category_sel = st.multiselect("카테고리 필터", list(HOTEL_CATEGORIES.keys()),
                                           default=[], key="rm_cat")
         with f_col3:
-            search_keyword = st.text_input("🔎 본문 검색", placeholder="예: 조식, 청결...", key="rm_search")
             sort_order = st.selectbox(
                 "정렬",
                 ["최신 수집순", "오래된 수집순", "낮은 점수 먼저", "높은 점수 먼저",
@@ -1337,8 +1369,13 @@ with main_tabs[4]:
                 key="rm_sort",
             )
 
-    filtered = df[df["platform"].isin(platforms_sel)]
-    filtered = filtered[filtered["status_norm"].isin(status_sel)]
+    # ─── 필터 적용 ───
+    # 검색 중이면 플랫폼/상태 필터는 풀어줌 (전체에서 찾기)
+    if is_searching:
+        filtered = df.copy()
+    else:
+        filtered = df[df["platform"].isin(platforms_sel)]
+        filtered = filtered[filtered["status_norm"].isin(status_sel)]
 
     if score_filter == "낮음 (≤50%)":
         filtered = filtered[filtered["score_pct"].notna() & (filtered["score_pct"] <= 50)]
@@ -1358,16 +1395,40 @@ with main_tabs[4]:
             )
         ]
 
-    if search_keyword:
-        kw = search_keyword.lower()
-        mask = (
-            filtered["content"].str.lower().str.contains(kw, na=False)
-            | filtered["title"].str.lower().str.contains(kw, na=False)
-            | filtered["positive"].str.lower().str.contains(kw, na=False)
-            | filtered["negative"].str.lower().str.contains(kw, na=False)
-            | filtered["satisfaction_tags"].str.lower().str.contains(kw, na=False)
-        )
-        filtered = filtered[mask]
+    # ─── 검색 적용 ───
+    if is_searching:
+        kw_raw = search_keyword.strip()
+        kw = kw_raw.lower()
+
+        # 검색 대상 컬럼: 본문 + 작성자 이름 + (옵션)AI답변
+        def build_search_target(row):
+            parts = [
+                str(row.get("content", "")),
+                str(row.get("title", "")),
+                str(row.get("positive", "")),
+                str(row.get("negative", "")),
+                str(row.get("satisfaction_tags", "")),
+                str(row.get("user", "")),
+                str(row.get("owner_reply", "")),
+            ]
+            if search_in_reply:
+                parts.append(str(row.get("ai_reply", "")))
+                parts.append(str(row.get("final_reply", "")))
+            return " ".join(parts).lower()
+
+        filtered["_search_target"] = filtered.apply(build_search_target, axis=1)
+
+        if search_mode == "정확히 일치":
+            mask = filtered["_search_target"].str.contains(re.escape(kw), na=False)
+        elif search_mode == "단어 모두 포함 (AND)":
+            words = [w.strip() for w in kw.split() if w.strip()]
+            mask = pd.Series([True] * len(filtered), index=filtered.index)
+            for w in words:
+                mask = mask & filtered["_search_target"].str.contains(re.escape(w), na=False)
+        else:  # 부분 일치
+            mask = filtered["_search_target"].str.contains(re.escape(kw), na=False)
+
+        filtered = filtered[mask].drop(columns=["_search_target"])
 
     if sort_order == "오래된 수집순":
         filtered = filtered.iloc[::-1]
@@ -1392,8 +1453,35 @@ with main_tabs[4]:
     avg_pct = filtered["score_pct"].dropna().mean()
     c4.metric("평균 만족도", f"{avg_pct:.0f}%" if not pd.isna(avg_pct) else "—")
 
-    if len(low_score_waiting) > 0:
+    # ─── 검색 결과 알림 ───
+    if is_searching:
+        if len(filtered) == 0:
+            st.error(f"😶 '{search_keyword}' 검색 결과가 없어요. 띄어쓰기/오타를 확인하거나 검색 모드를 '부분 일치'로 바꿔보세요.")
+        else:
+            plat_breakdown = filtered.groupby("platform").size().sort_values(ascending=False)
+            breakdown_text = ", ".join([f"{p}: {c}개" for p, c in plat_breakdown.items()])
+            st.success(f"🔎 **'{search_keyword}'** 검색 결과 **{len(filtered)}개** 매칭 — {breakdown_text}")
+
+    if len(low_score_waiting) > 0 and not is_searching:
         st.warning(f"🚨 점수가 낮은 리뷰 {len(low_score_waiting)}개가 답변을 기다리고 있습니다.")
+
+    # ─── 매칭 부분 하이라이트 함수 ───
+    def highlight_match(text, keyword, mode):
+        """검색어를 노란색 마크다운으로 하이라이트"""
+        if not text or not keyword:
+            return text
+        text = str(text)
+        if mode == "단어 모두 포함 (AND)":
+            words = [w.strip() for w in keyword.split() if w.strip()]
+        else:
+            words = [keyword.strip()]
+        # 정규식: 대소문자 무시
+        for w in words:
+            if not w:
+                continue
+            pattern = re.compile(re.escape(w), re.IGNORECASE)
+            text = pattern.sub(lambda m: f"<mark style='background-color:#fef08a;padding:0 2px;border-radius:3px'>{m.group(0)}</mark>", text)
+        return text
 
     st.markdown("---")
 
@@ -1473,24 +1561,45 @@ with main_tabs[4]:
                         header_parts.append("👎")
 
                     is_waiting = status == "대기중"
+                    # 검색 중이면 매칭된 리뷰 모두 자동 펼침
+                    expand_this = is_waiting or is_searching
                     header = " ".join(header_parts)
 
-                    with st.expander(header, expanded=is_waiting):
+                    with st.expander(header, expanded=expand_this):
                         col1, col2 = st.columns([3, 1])
                         with col1:
+                            # 하이라이트 적용 헬퍼
+                            def hl(text):
+                                if is_searching and text:
+                                    return highlight_match(text, search_keyword, search_mode)
+                                return text
+
                             if row.get("title"):
-                                st.markdown(f"### {row['title']}")
+                                if is_searching:
+                                    st.markdown(f"### {hl(row['title'])}", unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f"### {row['title']}")
 
                             if row.get("positive") or row.get("negative"):
                                 if row.get("positive"):
                                     st.markdown("**😊 좋았던 점**")
-                                    st.markdown(f"> {row['positive']}")
+                                    if is_searching:
+                                        st.markdown(f"> {hl(row['positive'])}", unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"> {row['positive']}")
                                 if row.get("negative"):
                                     st.markdown("**😞 아쉬운 점**")
-                                    st.markdown(f"> {row['negative']}")
+                                    if is_searching:
+                                        st.markdown(f"> {hl(row['negative'])}", unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"> {row['negative']}")
                             else:
                                 st.markdown("**[원문]**")
-                                st.markdown(f"> {row.get('content', '(내용 없음)')}")
+                                content = row.get('content', '(내용 없음)')
+                                if is_searching:
+                                    st.markdown(f"> {hl(content)}", unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f"> {content}")
 
                             if row.get("satisfaction_tags"):
                                 st.caption(f"⭐ {row['satisfaction_tags']}")
@@ -1512,8 +1621,11 @@ with main_tabs[4]:
                                 st.caption(" | ".join(meta))
 
                             if row.get("owner_reply"):
-                                with st.expander("📩 호텔 측 기존 답변 보기"):
-                                    st.markdown(f"> {row['owner_reply']}")
+                                with st.expander("📩 호텔 측 기존 답변 보기", expanded=is_searching):
+                                    if is_searching:
+                                        st.markdown(f"> {hl(row['owner_reply'])}", unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"> {row['owner_reply']}")
 
                             st.markdown("---")
 
